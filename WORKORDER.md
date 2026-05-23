@@ -39,6 +39,30 @@ Non-goals:
 
 ---
 
+## Ground rules
+
+These are load-bearing. Break them and you're working against the stack
+rather than with it.
+
+1. **No pull-streams.** The anproto stack (`anproto/`, `apds/`, `wiredove/`)
+   is async/await + ES modules + `ReadableStream` native. The ssbc
+   ecosystem we're porting from uses pull-streams everywhere; rewrite
+   those pipelines to async iterators on the way in. Never add
+   `pull-stream`, `pull-paramap`, `pull-cat`, `stream-to-pull-stream`,
+   etc. to this codebase.
+2. **Deno, not Node.** Matches anproto / apds / wiredove. Run with
+   `deno run -A`. Use `Deno.Command`, `Deno.serve`, `Deno.readFile`,
+   not `child_process` / `http` / `fs`.
+3. **No new abstractions until phase 2.** v0 keeps the bare repo
+   authoritative; phase 1 adds signed messages alongside. Don't build
+   the "rebuild repo from blobs" generality until phase 2 forces it.
+4. **Test against real `git` over real HTTP.** No mocks for the protocol
+   surface. Spin up a real Deno server in a temp dir and run real
+   `git clone` / `git push` against it. Mocks drift; the protocol
+   doesn't.
+
+---
+
 ## Architecture
 
 Five layers, top to bottom. Each is replaceable.
@@ -74,6 +98,32 @@ layer is a side-effect log) because that's the cheapest way to get smart-
 HTTP working. v1 onward inverts back: a fresh node with no bare repos but
 with the signed message log can reconstruct every repo from gossiped pack
 blobs.
+
+---
+
+## Code reuse from git-ssb
+
+Estimated ~1500 LOC of git-ssb code translates over (subject to the
+no-pull-streams rule — rewrite as you port).
+
+| Source | LOC | Reuse | Notes |
+|---|---|---|---|
+| `ssbc/plugins/git-server.js` | 1088 | ~70% direct | pkt-line parsing, sideband, `buildRefAdvert`, `normalizeReceivePack`, the LCS diff engine, all the JSON read handlers. SSB-specific calls (`sbot.publish`, `repo.addSSBBlob`, `gitRepo.getRepo`) get swapped for `messages.publish(envelope)`, `blob.put(bytes)`, and `bareRepoPath(authorPub, name)` respectively. |
+| `ssbc/decent/src/modules/git/git-browser.js` | 1311 | ~50% | Rendering for refs/tree/blob/diff/log. Consumes the same JSON API shape. Needs modernization (depject + `var` → ES modules + async/await). |
+| `ssb-issues/lib/schemas.js` | ~70 | reference | Message shape reference for our `git-issue-*`. Already aligned. |
+| `ssb-pull-requests/lib/schemas.js` | ~40 | reference | PR field names (`baseRepo`/`baseBranch`/`headRepo`/`headBranch`) ported as-is. |
+| `ssbc/node_modules/ssb-git-repo/lib/repo.js` | 1282 | 0% direct | Reconstructs a git repo from SSB messages + blobs. Phase 2 needs equivalent capability but our approach is simpler: replay packs into a bare repo on disk. Worth reading for the pack-chain reasoning; don't copy. |
+| `pull-git-pack`, `pull-git-packidx-parser`, etc. | n/a | 0% | We shell out to `git index-pack` and friends. Skip. |
+| `git-remote-ssb`, `git-ssb` CLI, `git-ssb-web` | n/a | 0% | Obsolete (`ssb://` scheme) or superseded. |
+
+Three patterns from git-ssb that this work order has already folded in:
+
+1. **Comments as `type: post` with `root: <issueId>`.** Not a dedicated
+   `git-issue-comment` type. Reuses wiredove's thread UI for free.
+2. **Reactions via existing `type: vote`** with `link` pointing at
+   issue/PR/commit hashes.
+3. **PR field naming**: `baseRepo`/`baseBranch`/`headRepo`/`headBranch`
+   (matches `ssb-pull-requests/lib/schemas.js` and GitHub vocabulary).
 
 ---
 
@@ -189,16 +239,21 @@ extra infrastructure beyond what's already running.
 Message types added (see [Message schema](#message-schema)):
 
 - `git-issue-open`
-- `git-issue-comment`
 - `git-issue-update`
+- (comments are `type: post` with `root: <issueId>` — no new type)
+- (reactions are `type: vote` with `link: <issueId>` — no new type)
 
 Concrete steps:
 
-1. Implement the message types in `repo.js`.
+1. Implement `git-issue-open` and `git-issue-update` in `repo.js`.
 2. Index on receive: for each `git-issue-*` message, update an in-memory
    `issues[repoId][issueId]` derived view, persisted to
-   `cache/issues.json` periodically (apds pattern).
+   `cache/issues.json` periodically (apds pattern). Walk
+   `type: post` messages whose `root` matches a known issueId to build
+   the comment thread; walk `type: vote` messages whose `link` matches
+   to build reaction counts.
 3. UI: issue list, issue detail with comment thread, "new issue" form.
+   Comment composer reuses wiredove's existing post composer.
 4. Permissions: anyone can open or comment; only repo owner can change
    state via `git-issue-update`.
 
@@ -624,13 +679,17 @@ forkOf: <sourceAuthor><sourceName>
 repo: <author><name>      # this fork's identity
 ```
 
+PR field names mirror git-ssb (`ssb-pull-requests/lib/schemas.js`) and
+GitHub's vocabulary: **base** = the repo being merged into, **head** = the
+fork the changes come from.
+
 ```yaml
 type: git-pr-open
-id: <self-hash>           # filled in after sign; for now use sigHash
-sourceRepo: <author><name>
-sourceRef: refs/heads/feature-x
-targetRepo: <author><name>
-targetRef: refs/heads/main
+id: <sigHash>             # the message's own hash (filled in after sign)
+baseRepo: <author><name>  # target repo (where the PR will merge into)
+baseBranch: refs/heads/main
+headRepo: <author><name>  # source / fork repo (where the changes live)
+headBranch: refs/heads/feature-x
 title: Add WebSocket gossip
 body: |
   Implements phase 3 of the work order. See …
@@ -663,9 +722,14 @@ labels: [bug]
 ```
 
 ```yaml
-type: git-issue-comment
-issue: <issueId>
-body: |
+# Comments on an issue or PR are NOT a new message type. Reuse the
+# existing apds/wiredove `type: post` with `root: <issueId or prId>`,
+# the same way ssb-issues threads issues with regular SSB posts. This
+# means wiredove's existing reply/thread UI Just Works for forge
+# conversations, no parallel comment renderer needed.
+type: post
+root: <issueId or prId>
+text: |
   fixed in commit abc123
 ```
 
@@ -675,6 +739,18 @@ issue: <issueId>
 state: closed             # open | closed
 assignee: <pub>           # optional
 labels: [bug, wontfix]    # optional, replaces
+```
+
+```yaml
+# Reactions on issues/PRs/commits use apds's existing `type: vote`,
+# again matching ssb-issues / ssbc/AGENTS.md's vote schema. The `link`
+# can point at any signed message hash OR a bare git sha1 (for commit
+# reactions).
+type: vote
+vote:
+  link: <issueId | prId | commitSha1 | reviewId>
+  value: 1                # 1 = react, 0 = retract, -1 = downvote
+  reason: "🚀"            # emoji label
 ```
 
 ```yaml
