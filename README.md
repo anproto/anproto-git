@@ -8,9 +8,14 @@ The thesis: the only meaningful thing classic SSB still has over
 signed-feed git hosting that survives without a central forge. This is the
 ANProto-native version.
 
+See [WORKORDER.md](WORKORDER.md) for the phased plan to turn this into a
+full forge (issues, PRs, multi-writer, gossip, web UI). See
+[PROGRESS.md](PROGRESS.md) for what landed when.
+
 ## Status
 
-Scratch. Scaffold only — the protocol bits are stubbed.
+Phase 0 of [WORKORDER.md](WORKORDER.md) — push and clone work against a
+single-node bare repo; nothing is signed yet.
 
 Run:
 
