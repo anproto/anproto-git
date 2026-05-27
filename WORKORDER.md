@@ -1,15 +1,22 @@
 # anproto-git work order
 
-The plan to take this from "scaffold that signs nothing" to **git.anproto.com**
-— a hostable, replicating, multi-writer git forge with issues and PRs, all
-state carried by signed ANProto messages.
+The plan to take this from "scaffold that signs nothing" to a hostable,
+replicating git remote, then later to a fuller forge product.
+
+The protocol kernel is intentionally small and lives in [SPEC.md](SPEC.md):
+repo identity, signed repo creation, signed git updates, self-contained pack
+references, deterministic replay, replication, tombstones, and owner push
+auth. This work order is broader than the protocol. Issues, PRs, reviews,
+reactions, multi-writer collaborators, browser gossip, search, custom domains,
+metrics, badges, encrypted repos, key rotation, and deployment polish are
+roadmap/product notes unless [SPEC.md](SPEC.md) says otherwise.
 
 This document has two halves:
 
 1. [Phased build order](#phased-build-order) — milestones with concrete
    deliverables, in the order to do them.
-2. [Design Q&A](#design-qa) — every question I can think of, answered. If
-   you read only one section, read this one.
+2. [Product / implementation Q&A](#product--implementation-qa) — design
+   notes that may inform later specs, but are not protocol by themselves.
 
 Keep this document append-mostly. When a phase ships, mark it done in
 [PROGRESS.md](PROGRESS.md) but leave the work order text intact so the
@@ -20,10 +27,10 @@ reasoning trail is still readable.
 ## Vision
 
 > Anyone runs `anproto-git serve` on a box they own. They get a public git
-> remote (`http://their-host/git/<their-pub>/<repo>`) that accepts pushes,
-> serves clones, hosts issues and PRs, and gossips with other anproto-git
-> nodes so a follower can replicate the whole repo+conversation without
-> ever talking to the original host.
+> remote (`http://their-host/git/<their-pub>/<repo>`) that accepts authorized
+> owner pushes, serves clones, and replicates signed git updates with other
+> nodes so a follower can rebuild the repo without ever talking to the
+> original host.
 
 The official relay at `git.anproto.com` is just one node among equals. It
 doesn't hold authority; it holds a copy.
@@ -31,8 +38,9 @@ doesn't hold authority; it holds a copy.
 Non-goals:
 
 - A protocol-level rewrite of git. We use stock git over the wire.
-- A new social network. Posts, follows, replies stay in apds/wiredove. This
-  is the forge layer.
+- A new social network. Posts, follows, replies stay in apds/wiredove.
+- A full forge in the core protocol. Issues, PRs, review, search, and UI are
+  product layers.
 - Built-in CI. We can ship hook-points for external CI; running CI is out
   of scope.
 - Private repos in v1. Encrypted refs/blobs come later.
@@ -71,20 +79,18 @@ Five layers, top to bottom. Each is replaceable.
 ┌─────────────────────────────────────────────────────────────┐
 │ git client / web browser / wiredove                         │
 ├─────────────────────────────────────────────────────────────┤
-│ smart-HTTP + JSON API + web UI    serve.js                  │
+│ smart-HTTP (+ later JSON API / web UI)    serve.js          │
 │   /git/<author>/<name>/{info/refs, git-upload-pack, ...}    │
-│   /git/<author>/<name>/json/{refs, log, tree, blob, diff}   │
-│   /git/<author>/<name>/issues/<id>  …                       │
 ├─────────────────────────────────────────────────────────────┤
 │ Git engine (per-repo bare repo on disk)    git.js           │
 │   spawns `git http-backend`, `git index-pack`, etc          │
 ├─────────────────────────────────────────────────────────────┤
 │ ANProto layer    repo.js, messages.js                       │
-│   signs+publishes git-repo, git-update, git-issue-* etc     │
+│   signs+publishes git-repo, git-update                      │
 │   reads back from local message log to derive forge state   │
 ├─────────────────────────────────────────────────────────────┤
-│ Storage    blob.js, log.js                                  │
-│   filesystem blob store (binary, sha256-of-bytes)           │
+│ Storage    anproto-blobs, log.js                            │
+│   self-contained pack blobs                                 │
 │   per-author signed-message log                             │
 ├─────────────────────────────────────────────────────────────┤
 │ Replication    gossip.js                                    │
@@ -101,7 +107,7 @@ blobs.
 
 ---
 
-## Code reuse from git-ssb
+## Porting notes from git-ssb
 
 Estimated ~1500 LOC of git-ssb code translates over (subject to the
 no-pull-streams rule — rewrite as you port).
@@ -137,29 +143,35 @@ Don't move to the next phase until the current one passes its DoD.
 See [PROGRESS.md](PROGRESS.md). Status: `git push` and `git clone` work
 against a single-node bare repo. Nothing is signed yet.
 
-### Phase 1 — sign on push
+### Phase 1 — owner-authenticated sign on push
 
-**Goal:** every successful push produces a signed `git-update` ANProto
-message and a binary blob containing the pack.
+**Goal:** every successful owner-authorized push produces a signed
+`git-update` ANProto message and an `anproto-blobs` handle for a
+self-contained pack.
 
 Concrete steps:
 
 1. Refactor `git.js`. Currently `httpBackend` lets `git http-backend`
    consume the request body directly. To capture the pack, we have to read
    the body ourselves first, then *re-feed* it to http-backend via stdin.
-2. Before re-feeding, run `git index-pack --stdin -o tmp.idx tmp.pack` to
-   validate the pack (mirrors `ssbc/plugins/git-server.js:154`).
-3. Read `tmp.pack` + `tmp.idx`, hash each, store in `blob.put()`.
-4. Parse the pkt-line ref-update section to extract `{name, old, new}`
+2. Require the owner challenge/response from [SPEC.md](SPEC.md) before
+   accepting public receive-pack requests. Localhost scaffolding may bypass.
+3. Before re-feeding, validate the incoming pack and store a self-contained
+   pack. Either force `no-thin` or run `git index-pack --fix-thin` and store
+   the completed bytes.
+4. Store the pack via `anproto-blobs`. `.idx` files are local cache state,
+   not required protocol references.
+5. Parse the pkt-line ref-update section to extract `{ref, old, new}`
    triples — also mirrored from git-ssb.
-5. Build a `git-update` message body via `repo.js:gitUpdateMessage` and
+6. Build a canonical JSON `git-update` message body via
+   `repo.js:gitUpdateMessage` and
    sign with the server's keypair.
-6. Append the signed envelope to `log/by-author/<pub>/<ts>-<sigHash>.sig`.
+7. Append the signed envelope to `log/by-author/<pub>/<ts>-<sigHash>.sig`.
 
 **Definition of done:** push to a fresh repo, then `cat log/by-author/<pub>/*.sig
-| head` shows the signed envelope, `ls blobs/` shows two new blobs (pack
-+ idx), and the message body's `pack` field matches one of the blob
-hashes byte-for-byte.
+| head` shows the signed envelope, the message verifies, its `pack` field is
+an `anproto-blobs` handle whose bytes hash/validate, and replay can regenerate
+the git index from the stored pack.
 
 ### Phase 2 — rebuild from log
 
@@ -173,10 +185,11 @@ Concrete steps:
    If not, `git init --bare` it.
 2. Query the local message log for `type=git-update`, `repo=<pub>/<name>`,
    sorted by `ts` ascending.
-3. For each message, fetch the pack blob by hash, write it to
-   `repos/<pub>/<name>.git/objects/pack/`, then run `git index-pack
-   --verify` to install the idx.
-4. Apply the refs by writing `refs/heads/...` files.
+3. Select the deterministic canonical update chain described in
+   [SPEC.md](SPEC.md).
+4. For each message, fetch `pack` via `anproto-blobs`, run `git index-pack`
+   to install it, verify each `old` ref, then apply all `new` refs
+   atomically.
 5. Done — http-backend can now serve from this rebuilt repo.
 
 **Definition of done:** push a few commits to a repo, delete the
@@ -187,7 +200,7 @@ the same history.
 
 **Goal:** two anproto-git servers can be configured to peer with each
 other. After a push on server A, server B's local log gains the same
-`git-update` envelope and blob, and server B can serve a clone of the
+`git-update` envelope and pack blob, and server B can serve a clone of the
 same repo.
 
 Concrete steps:
@@ -201,7 +214,7 @@ Concrete steps:
    message envelopes from that author since that ts. Used for HTTP poll
    fallback if a peer can't keep a socket open.
 4. On receive: verify the signature, dedupe by sigHash, append to local
-   log, then if there are blob references (pack, index) ask for them.
+   log, then if there is a `pack` reference ask for it via `anproto-blobs`.
 5. Selective replication: a server only replicates authors+repos it has
    opted into via `subscriptions.json` (or `*` for a public relay).
 
@@ -231,7 +244,7 @@ Concrete steps:
 Chrome, see the README rendered, click "DESIGN.md", see the file, click a
 commit, see the diff.
 
-### Phase 5 — issues
+### Product phase 5 — issues (out of core)
 
 **Goal:** open / comment / close issues on any anproto-git repo, with no
 extra infrastructure beyond what's already running.
@@ -260,7 +273,7 @@ Concrete steps:
 **Definition of done:** open issue from server A, see it on server B via
 gossip, comment from B, see comment back on A.
 
-### Phase 6 — PRs and forks
+### Product phase 6 — PRs and forks (out of core)
 
 **Goal:** fork a repo, push to your fork, open a PR against the original.
 
@@ -292,10 +305,9 @@ Concrete steps:
 **Definition of done:** A forks B's repo, A pushes a commit to A's fork,
 A opens a PR, B merges, the merge commit shows up on B's main branch.
 
-### Phase 7 — auth and permissions
+### Product phase 7 — collaborators and permissions (out of core)
 
-**Goal:** receive-pack rejects pushes that aren't signed by an authorized
-key for the target repo.
+**Goal:** extend the core owner-only push auth to collaborator keys.
 
 Concrete steps:
 
@@ -314,7 +326,7 @@ Concrete steps:
 **Definition of done:** unauthorized push to someone else's repo on
 `git.anproto.com` returns 401. Authorized collaborator push succeeds.
 
-### Phase 8 — discovery and bootstrap
+### Product phase 8 — discovery and bootstrap (out of core)
 
 **Goal:** a brand new node can find peers and start replicating without
 hand-editing `peers.json`.
@@ -333,7 +345,7 @@ Concrete steps:
 **Definition of done:** clone fresh node → it dials bootstrap → it pulls
 my author's recent messages → I can browse my profile and repos.
 
-### Phase 9 — CLI ergonomics
+### Product phase 9 — CLI ergonomics
 
 **Goal:** a developer's day involves `anproto-git` commands, not `curl`
 incantations.
@@ -355,7 +367,7 @@ anproto-git sync                           # one-shot pull from peers
 
 Wraps either local server's HTTP API or a configured remote relay.
 
-### Phase 10 — polish
+### Product phase 10 — polish
 
 - Custom domain support (Host header → author resolution table)
 - Backup CLI: `anproto-git export <repo> > backup.tar.zst`
@@ -365,7 +377,7 @@ Wraps either local server's HTTP API or a configured remote relay.
 
 ---
 
-## Design Q&A
+## Product / implementation Q&A
 
 ### Identity
 
@@ -520,9 +532,11 @@ required").
 ### Blobs
 
 **Q: What goes in the blob store?**
-A: Git pack files. Git index (`.idx`) files. Eventually: image
-attachments in issue/PR bodies, large markdown previews, anything binary
-that messages reference by hash.
+A: Protocol state stores self-contained git pack files through
+`anproto-blobs`. Git index (`.idx`) files are local cache artifacts that
+can be regenerated from packs. Later product features may also store image
+attachments, large markdown previews, or other binary content by blob
+handle.
 
 **Q: How is a blob hashed?**
 A: `crypto.subtle.digest("SHA-256", bytes)` → base64-encoded → 44 chars.
@@ -532,10 +546,8 @@ from `apds.hash`**, which TextEncoders the input. Reconciliation work
 see [`apds` and string vs bytes](#apds-and-string-vs-bytes) below.
 
 **Q: Storage layout?**
-A: `blobs/<aa>/<bb>/<full-hash>` where `aa`/`bb` are the first two
-base64 chars of the hash (after `/` → `_` substitution). Two-level
-sharding caps any one directory at ~64×64 = 4096 entries before
-sub-sharding kicks in.
+A: Core pack storage follows `anproto-blobs`. The old `blob.js`
+filesystem layout is phase-0 scaffolding only.
 
 **Q: Streaming?**
 A: Yes for reads. `blob.stream(hash)` returns a `ReadableStream` so the
@@ -548,10 +560,10 @@ A: Native. Hash collision = same blob. `blob.put` is idempotent — if the
 file exists at the target path, skip.
 
 **Q: Garbage collection?**
-A: Refcount by message references. Every `git-update` references a
-`pack` and `index` blob. A blob is collectable when no current message
+A: Refcount by message references. Every core `git-update` references a
+`pack` blob handle. A blob is collectable when no current message
 references it AND its referencing messages are older than a configurable
-grace period (default 30 days). The grace period exists so a freshly-
+grace period (default 30 days). The grace period exists so a freshly
 replicated peer can still find historical packs.
 
 In practice we'll probably leave GC turned off in v1 and revisit when
@@ -560,10 +572,9 @@ and dedupes well; pack reuse across pushes is meaningful.
 
 **Q: Pack repacking — can a server consolidate 100 small packs into one
 big one?**
-A: Yes, as an optimization. The repacked blob is hashed and stored.
-Server publishes a `git-repack` message linking to the consolidated pack
-and listing the obsoleted pack hashes. Followers can choose to drop the
-old packs once the repack message has propagated.
+A: Yes, locally. A server can run normal `git gc` or repack its bare-repo
+cache. Networked `git-repack` messages are deliberately out of core until
+storage pressure proves they are needed.
 
 **Q: What about loose objects?**
 A: Server-side everything is always in packs (because that's what
@@ -590,15 +601,16 @@ the bytes — find a pack whose sha256 matches and you have what the
 signer pointed to.
 
 **Q: Multiple packs per push?**
-A: Allowed. `git-update.pack` becomes an array. v0 will only emit one
-because `git index-pack --stdin` emits one. v2 could split very large
-pushes by depth.
+A: Out of core. Version 1 `git-update` has one self-contained `pack`
+handle. Splitting very large pushes can be revisited after the simple
+replay path is proven.
 
 ### Messages
 
 **Q: Message format?**
-A: Same as apds — ANProto sig envelope wrapping a YAML body. Body fields
-documented per type below.
+A: Core anproto-git messages are canonical JSON bodies wrapped in ANProto
+signature envelopes; see [SPEC.md](SPEC.md). Product-layer message sketches
+below are non-normative until promoted into their own specs.
 
 **Q: Storage?**
 A: Per-author append log: `messages/by-author/<pub>/<ts>-<sigHash>.sig`.
@@ -623,10 +635,12 @@ supersede old ones; old ones still readable.
 A: Soft 64 KiB per message body. Larger payloads go through the blob
 store and the message references by hash. Same pattern as SSB.
 
-#### Message schema
+#### Product message sketches
 
-All message bodies are YAML with a leading `type` field. Listed roughly
-in order of introduction.
+Core `git-repo`, `git-update`, and `git-tombstone` live in
+[SPEC.md](SPEC.md). The sketches below are roadmap notes for forge product
+features. They are not core protocol and should use structured repo ids
+before implementation.
 
 ```yaml
 # Already used by apds/wiredove. Kept here for completeness.
@@ -636,16 +650,8 @@ text: |
 ```
 
 ```yaml
-type: git-repo
-name: anproto-git
-description: git over ANProto
-license: MIT          # optional
-topics: [git, anproto] # optional
-```
-
-```yaml
 type: git-repo-settings
-repo: <author><name>      # 44 + slug
+repo: { author: <pub>, name: <slug> }
 defaultBranch: main
 protectedBranches: [main]
 allowForks: true
@@ -653,21 +659,8 @@ mergeStrategy: rebase     # rebase | merge | squash
 ```
 
 ```yaml
-type: git-update
-repo: <author><name>
-refs:
-  refs/heads/main: f00ba1...
-  refs/heads/dev: c0ffee...
-  refs/tags/v1.0: deadbe...
-pack: <base64-sha256>     # blob hash
-index: <base64-sha256>    # blob hash (the .idx)
-numObjects: 142
-parentUpdate: <sigHash>   # optional, last git-update we saw
-```
-
-```yaml
 type: git-permissions
-repo: <author><name>
+repo: { author: <pub>, name: <slug> }
 grants:
   - <collaboratorPub1>
   - <collaboratorPub2>
@@ -675,8 +668,8 @@ grants:
 
 ```yaml
 type: git-fork
-forkOf: <sourceAuthor><sourceName>
-repo: <author><name>      # this fork's identity
+forkOf: { author: <sourcePub>, name: <sourceSlug> }
+repo: { author: <forkPub>, name: <forkSlug> }
 ```
 
 PR field names mirror git-ssb (`ssb-pull-requests/lib/schemas.js`) and
@@ -686,9 +679,9 @@ fork the changes come from.
 ```yaml
 type: git-pr-open
 id: <sigHash>             # the message's own hash (filled in after sign)
-baseRepo: <author><name>  # target repo (where the PR will merge into)
+baseRepo: { author: <pub>, name: <slug> }
 baseBranch: refs/heads/main
-headRepo: <author><name>  # source / fork repo (where the changes live)
+headRepo: { author: <pub>, name: <slug> }
 headBranch: refs/heads/feature-x
 title: Add WebSocket gossip
 body: |
@@ -713,7 +706,7 @@ body: |
 ```yaml
 type: git-issue-open
 id: <sigHash>
-repo: <author><name>
+repo: { author: <pub>, name: <slug> }
 title: clone fails on empty repo
 body: |
   Reproduction steps:
@@ -753,27 +746,8 @@ vote:
   reason: "🚀"            # emoji label
 ```
 
-```yaml
-type: git-tombstone
-target: <repoOrMessageHash>
-reason: |
-  optional explanation
-```
-
-```yaml
-type: git-repack
-repo: <author><name>
-pack: <new-consolidated-pack-hash>
-index: <new-idx-hash>
-obsoletes:
-  - <old-pack-hash-1>
-  - <old-pack-hash-2>
-```
-
-```yaml
-type: identity-rotate
-newKey: <newPub>
-```
+Core tombstones live in [SPEC.md](SPEC.md). Networked repack messages and
+identity rotation are deliberately out of core.
 
 ### Replication / gossip
 
@@ -1007,18 +981,19 @@ hashes must match across implementations or replication breaks.
 
 **Q: How do we reconcile?**
 A: Push a change upstream into apds: split `apds.hash(string)` and
-`apds.hashBytes(uint8array)`. Make YAML message bodies (which are
-strings) use the former; binary blobs use the latter. anproto-git uses
-only `hashBytes` for its pack/idx blobs.
+`apds.hashBytes(uint8array)`. Text message bodies use the string path;
+binary blobs use the byte path. anproto-git core messages are canonical
+JSON strings, and pack bytes go through `anproto-blobs` / `hashBytes`.
 
 This is a small upstream change but it touches every implementation of
 ANProto (Go, Rust, Python). Coordinate before shipping.
 
 **Q: Can anproto-git proceed before that upstream change?**
-A: Yes. anproto-git's `blob.js` does raw-byte hashing today. The hash
-space is base64-sha256 either way; messages reference blobs by hash;
-the only thing that breaks is using `apds.make()` for binary content,
-which we don't do. Cleanup is a soft dependency.
+A: Yes. anproto-git's phase-0 `blob.js` does raw-byte hashing today, and
+the protocol target is `anproto-blobs`. The hash space is base64-sha256
+either way; messages reference blobs by handle/hash; the only thing that
+breaks is using `apds.make()` for binary content, which we don't do.
+Cleanup is a soft dependency.
 
 ### Performance
 
@@ -1135,8 +1110,8 @@ These don't have answers yet. They block phase 2+ if not resolved.
 
 ## What this document is not
 
-- A protocol spec. The schemas above are sketches; finalize per phase
-  in real PRs.
+- The protocol spec. The core protocol lives in [SPEC.md](SPEC.md); schemas
+  in this work order are product sketches unless promoted there.
 - A timeline. No dates because we don't know the cadence yet.
 - A contract. Things will change as we hit phases and learn.
 

@@ -8,9 +8,11 @@ The thesis: the only meaningful thing classic SSB still has over
 signed-feed git hosting that survives without a central forge. This is the
 ANProto-native version.
 
-See [WORKORDER.md](WORKORDER.md) for the phased plan to turn this into a
-full forge (issues, PRs, multi-writer, gossip, web UI). See
-[PROGRESS.md](PROGRESS.md) for what landed when.
+See [SPEC.md](SPEC.md) for the small core protocol: repo identity,
+signed push updates, pack/blob references, replay, replication, and push
+auth. See [WORKORDER.md](WORKORDER.md) for the product roadmap around
+that kernel (issues, PRs, web UI, deployment polish). See [PROGRESS.md](PROGRESS.md)
+for what landed when.
 
 ## Status
 
@@ -39,7 +41,7 @@ git push anproto HEAD
 | `serve.js` | Deno HTTP server. Routes `/git/:author/:name/*` to the smart-HTTP handler |
 | `git.js`   | Spawns `git http-backend` for smart-HTTP and announces pushes to the ANProto layer |
 | `repo.js`  | Repo lifecycle: creating a repo publishes a signed `git-repo` message; pushes publish `git-update` |
-| `blob.js`  | Filesystem-backed binary blob store keyed by sha256 (base64). Separate from apds's string-only store |
+| `blob.js`  | Phase-0 filesystem blob store. The protocol target is `anproto-blobs` handles |
 | `bin.js`   | CLI: `create`, `serve` |
 | `lib/`     | Pulls `an.js` from anproto, plus local helpers |
 
@@ -54,9 +56,9 @@ packfiles are raw binary and can be hundreds of MB; they need:
 3. Filesystem persistence on the server (browsers can replicate metadata
    but probably shouldn't carry pack blobs)
 
-`blob.js` here is that store. The hash space is the same as apds (base64
-sha256, 44 chars) so signed `git-update` messages can reference pack blobs
-the same way an apds message references its content.
+`blob.js` is the phase-0 version of that store. The protocol target is
+`anproto-blobs`: signed `git-update` messages reference pack bytes by an
+`anproto-blobs` handle, which may be a single chunk or a chunked manifest.
 
 ## Compared to git-ssb
 
@@ -69,8 +71,8 @@ git-ssb (in `ssbc/plugins/git-server.js`):
 
 anproto-git (here):
 
-- Repo identity = `<authorPub>/<name>` — anproto-native, no message hashes
-- Push: index-pack → store pack as binary blob → publish ANProto-signed
+- Repo identity = `{ author, name }` — anproto-native, no message hashes
+- Push: index-pack → store pack through `anproto-blobs` → publish ANProto-signed
   `git-update` → also unpack into a bare repo on disk
 - Pull: serve from the bare repo via `git http-backend` (fast, correct)
 - Bare repo on disk: **the derived view**. Authoritative state is still the
@@ -81,18 +83,13 @@ anproto-git (here):
 The bare-repo cache is the v0 simplification. It buys us correctness via
 `git http-backend` while we figure out the gossip story.
 
-## Open questions
+## Core cuts
 
-- **Refs are mutable; ANProto messages are not.** Two pushes from the same
-  author to the same repo produce two signed `git-update`s. Which wins?
-  Latest timestamp from the repo *owner* is the obvious answer; multi-writer
-  repos (PRs) need more thought.
-- **Pack rebuilding from gossiped blobs.** v0 keeps the bare repo as source
-  of truth and treats gossip as backup. v1 should flip that.
-- **Browser participation.** Wiredove can show repo activity and JSON tree
-  views over HTTP, but probably can't host repos. Is that OK?
-- **Discovery.** SSB git-ssb leans on the gossip log for repo discovery.
-  ANProto has no implicit subscription model — repos need to be addressed
-  by `<authorPub>/<name>` explicitly. Probably fine.
+The core spec intentionally excludes issues, PRs, reviews, reactions,
+multi-writer collaborator semantics, DHT/Trystero/browser gossip, global
+search, encrypted repos, key rotation, custom domains, badges, metrics,
+networked repack messages, and deployment polish. Those are forge product
+features or identity-layer work; they should not complicate deterministic
+git replay.
 
 MIT
