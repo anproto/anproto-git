@@ -47,7 +47,7 @@ button,select{font:inherit}
 .name{display:flex;gap:8px;align-items:center;min-width:0}.name span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .meta{color:var(--muted);font-size:12px;text-align:right}
 .readme{margin-top:16px}.readme h2{font-size:15px;margin:0;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--soft)}
-.md{padding:16px;max-width:840px}.md h1,.md h2,.md h3{line-height:1.25}.md pre,.file pre,.patch{overflow:auto;margin:0;padding:14px 16px;background:#f6f8fa;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.md{padding:16px;max-width:940px}.md h1,.md h2,.md h3{line-height:1.25}.md pre,.file pre,.patch{overflow:auto;margin:0;padding:14px 16px;background:#f6f8fa;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}.md table{border-collapse:collapse;width:100%;display:block;overflow:auto;margin:12px 0}.md th,.md td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}.md th{background:var(--soft);font-weight:600}.md code{background:var(--soft);border-radius:4px;padding:1px 4px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}.md pre code{background:transparent;padding:0}.md blockquote{margin:12px 0;padding:0 12px;color:var(--muted);border-left:3px solid var(--line)}.md ul,.md ol{padding-left:24px}
 .filebar{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--soft);color:var(--muted)}
 .commits{display:grid;gap:0}.commit{display:grid;grid-template-columns:minmax(0,1fr) 140px 92px;gap:12px;padding:12px;border-top:1px solid var(--line)}
 .commit:first-child{border-top:0}.commit-title{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.muted{color:var(--muted);font-size:12px}.sha{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}
@@ -99,17 +99,50 @@ const short = (sha) => sha ? sha.slice(0, 7) : "";
 const fmtDate = (iso) => iso ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(iso)) : "";
 const setError = (err) => { app.innerHTML = '<div class="panel error">' + esc(err.message || String(err)) + '</div>'; };
 const md = (text) => {
-  const lines = esc(text).split("\\n");
-  let out = "", inCode = false;
-  for (const line of lines) {
-    if (line.startsWith(String.fromCharCode(96).repeat(3))) { out += inCode ? "</code></pre>" : "<pre><code>"; inCode = !inCode; continue; }
-    if (inCode) { out += line + "\\n"; continue; }
-    if (line.startsWith("# ")) out += "<h1>" + line.slice(2) + "</h1>";
-    else if (line.startsWith("## ")) out += "<h2>" + line.slice(3) + "</h2>";
-    else if (line.startsWith("### ")) out += "<h3>" + line.slice(4) + "</h3>";
-    else if (!line.trim()) out += "";
-    else out += "<p>" + line + "</p>";
+  const raw = text.replace(/\\r\\n/g, "\\n").split("\\n");
+  let out = "", inCode = false, list = null, para = [];
+  const tick3 = String.fromCharCode(96).repeat(3);
+  const inline = (s) => esc(s)
+    .replace(/\\\`([^\\\`]+)\\\`/g, "<code>$1</code>")
+    .replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, '<a href="$2">$1</a>');
+  const closePara = () => { if (para.length) { out += "<p>" + inline(para.join(" ")) + "</p>"; para = []; } };
+  const closeList = () => { if (list) { out += "</" + list + ">"; list = null; } };
+  const cells = (line) => line.trim().replace(/^\\||\\|$/g, "").split("|").map(c => inline(c.trim()));
+  const isTableSep = (line) => /^\\s*\\|?\\s*:?-{3,}:?\\s*(\\|\\s*:?-{3,}:?\\s*)+\\|?\\s*$/.test(line);
+  for (let i = 0; i < raw.length; i++) {
+    const line = raw[i];
+    if (line.startsWith(tick3)) { closePara(); closeList(); out += inCode ? "</code></pre>" : "<pre><code>"; inCode = !inCode; continue; }
+    if (inCode) { out += esc(line) + "\\n"; continue; }
+    if (line.includes("|") && raw[i + 1] && isTableSep(raw[i + 1])) {
+      closePara(); closeList();
+      const headers = cells(line);
+      out += "<table><thead><tr>" + headers.map(h => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>";
+      i += 2;
+      while (i < raw.length && raw[i].includes("|") && raw[i].trim()) {
+        out += "<tr>" + cells(raw[i]).map(c => "<td>" + c + "</td>").join("") + "</tr>";
+        i++;
+      }
+      i--;
+      out += "</tbody></table>";
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\\s+(.+)$/);
+    if (heading) { closePara(); closeList(); const level = heading[1].length; out += "<h" + level + ">" + inline(heading[2]) + "</h" + level + ">"; continue; }
+    const bullet = line.match(/^\\s*[-*+]\\s+(.+)$/);
+    const ordered = line.match(/^\\s*\\d+\\.\\s+(.+)$/);
+    if (bullet || ordered) {
+      closePara();
+      const next = bullet ? "ul" : "ol";
+      if (list !== next) { closeList(); out += "<" + next + ">"; list = next; }
+      out += "<li>" + inline((bullet || ordered)[1]) + "</li>";
+      continue;
+    }
+    const quote = line.match(/^>\\s?(.+)$/);
+    if (quote) { closePara(); closeList(); out += "<blockquote>" + inline(quote[1]) + "</blockquote>"; continue; }
+    if (!line.trim()) { closePara(); closeList(); continue; }
+    para.push(line.trim());
   }
+  closePara(); closeList();
   if (inCode) out += "</code></pre>";
   return out;
 };
