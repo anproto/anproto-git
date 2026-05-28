@@ -2,6 +2,157 @@
 
 Append-only log of what landed and when. Newest entry on top.
 
+## 2026-05-28 — JSON API + minimal forge UI
+
+Pulled Phase 4 forward before peer replication so pushed anproto repos
+are browsable.
+
+**Works:**
+
+- JSON API routes under `/git/<pub>/<name>/api/`:
+  - `refs`
+  - `log?ref=<ref>`
+  - `tree?ref=<ref>&path=<path>`
+  - `blob?ref=<ref>&path=<path>`
+  - `commit/<sha>`
+  - `diff/<sha>`
+- Repo page at `/git/<pub>/<name>/` with:
+  - repo header and clone URL
+  - branch selector
+  - tree browser
+  - README rendering
+  - file view
+  - commit list
+  - commit diff view
+- All API/UI reads go through `ensureRepoView`, so deleting `repos/`
+  still rebuilds from `messages/` + `blobs/` before serving the page.
+
+**Verified:**
+
+```
+$ git push anproto main
+$ curl -fsS "$repo/api/refs"
+$ curl -fsS "$repo/api/log?ref=refs/heads/main"
+$ curl -fsS "$repo/api/tree?ref=refs/heads/main"
+$ curl -fsS "$repo/api/blob?ref=refs/heads/main&path=README.md"
+$ curl -fsS "$repo/api/diff/<sha>"
+```
+
+Opened the repo page in the in-app browser and clicked through tree,
+file, commits, and diff views successfully.
+
+**Still open / sharper later:**
+
+- README rendering is intentionally tiny, not full GitHub-flavored
+  Markdown.
+- Diff rendering is raw patch text for now.
+- No author/repo listing page yet; the homepage is still the old landing.
+- Phase 3 peer replication is still untouched.
+
+## 2026-05-28 — phase 1 complete, phase 2 replay slice
+
+Finished the rest of phase 1's core mechanics and landed the first
+phase 2 rebuild path.
+
+**Works:**
+
+- `parentUpdate` is now populated from the latest verified local
+  `git-update` for the repo.
+- `GET /git/<pub>/<name>/auth/challenge` issues a canonical JSON
+  challenge. With `ANPROTO_GIT_REQUIRE_AUTH=1`, receive-pack requires
+  `Authorization: AnProto <sig>` where the sig opens to that challenge's
+  body hash.
+- `bin.js auth-header <challenge-json-or-file>` signs a challenge with
+  the local keypair for use with Git's `http.extraHeader`.
+- Delete-only pushes are accepted and logged as `pack: null`,
+  `numObjects: 0`.
+- Push logging now waits until after `git http-backend` returns an
+  accepted receive-pack result, so rejected ref transactions do not enter
+  the message log.
+- If `repos/<pub>/<name>.git` is missing, the server creates a bare repo
+  and replays verified `git-update` messages from `messages/` plus pack
+  bytes from `blobs/`.
+- `verify.js` / `bin.js verify [data-dir]` checks message signatures,
+  body hashes, blob hashes, and pack indexability.
+
+**Verified:**
+
+```
+$ git push anproto main
+$ git push anproto main          # second commit records parentUpdate
+$ git push anproto :main         # delete-only update records pack: null
+$ deno run -A verify.js <data-dir>
+verified messages=3 packs=2 bytes=446
+$ rm -rf <data-dir>/repos
+$ git push anproto HEAD:main
+$ rm -rf <data-dir>/repos
+$ git clone http://127.0.0.1:<port>/git/<pub>/scratch rebuilt
+$ git -C rebuilt log --oneline -1
+<sha> two
+```
+
+Auth-required push was also checked with:
+
+```
+$ ANPROTO_GIT_REQUIRE_AUTH=1 PORT=19104 deno run -A serve.js
+$ git push anproto main          # rejected
+$ curl -fsS <repo-url>/auth/challenge -o challenge.json
+$ deno run -A bin.js auth-header challenge.json > header.txt
+$ git -c http.extraHeader="$(cat header.txt)" push anproto main
+```
+
+**Still open / sharper later:**
+
+- Replay currently applies the locally logged update order. The spec's
+  full divergent-chain canonicalization rules still need a dedicated pass.
+- Challenge auth is implemented server-side, but there is no polished
+  porcelain command that wraps challenge fetch + signed `git push`.
+- Phase 3 peer replication is still untouched.
+
+## 2026-05-28 — phase 1 push signing slice
+
+Landed the first real blob-backed push path.
+
+**Works:**
+
+- `git-receive-pack` POST bodies are read once, parsed for pkt-line ref
+  updates, then re-fed to `git http-backend` so normal Git push behavior
+  still works.
+- Incoming pack bytes are validated with `git index-pack --stdin
+  --fix-thin`, stored in [blob.js](blob.js), and counted via
+  `git show-index`.
+- Successful pushes append a signed canonical-JSON `git-update` body and
+  ANProto sig envelope under `messages/by-author/` and `messages/by-hash/`.
+- The server keypair is loaded from `keypair.txt` or generated on first
+  run. Localhost receive-pack rejects pushes whose URL author does not
+  match the server pubkey.
+- Filesystem paths for base64 pubkeys and hashes are made path-safe so `/`
+  and `+` do not create accidental path segments.
+
+**Verified:**
+
+```
+$ PORT=19101 deno run -A serve.js
+$ git push anproto main
+ * [new branch]      main -> main
+$ git clone http://127.0.0.1:19101/git/<pub>/scratch clone
+$ deno eval '... an.open(sig) ...'
+match=true
+$ git index-pack -o /tmp/incoming.idx <stored-blob-path>
+$ git show-index < /tmp/incoming.idx | wc -l
+3
+```
+
+**Still open in phase 1:**
+
+- Real challenge/response auth. Current owner check is only the localhost
+  scaffold: URL author must match the server keypair.
+- `parentUpdate` is still `null`; next pass should derive the latest
+  accepted update from the per-author log.
+- Delete-only pushes are logged with `pack: null`; replay code needs to
+  explicitly support that shape.
+- No replay/rebuild from the message log yet — that is still phase 2.
+
 ## 2026-05-23 — session 1 handoff (commit pending)
 
 End of session 1. Handing off to another agent — start with
