@@ -97,7 +97,7 @@ button,select{font:inherit}
 .name{display:flex;gap:8px;align-items:center;min-width:0}.name span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .meta{color:var(--muted);font-size:12px;text-align:right}
 .readme{margin-top:16px}.readme h2{font-size:15px;margin:0;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--soft)}
-.md{padding:16px;max-width:940px}.md h1,.md h2,.md h3{line-height:1.25}.md pre,.file pre,.patch{overflow:auto;margin:0;padding:14px 16px;background:#f6f8fa;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}.md table{border-collapse:collapse;width:100%;display:block;overflow:auto;margin:12px 0}.md th,.md td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}.md th{background:var(--soft);font-weight:600}.md code{background:var(--soft);border-radius:4px;padding:1px 4px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}.md pre code{background:transparent;padding:0}.md blockquote{margin:12px 0;padding:0 12px;color:var(--muted);border-left:3px solid var(--line)}.md ul,.md ol{padding-left:24px}
+.md{padding:16px;max-width:940px}.md h1,.md h2,.md h3{line-height:1.25}.md pre,.file pre,.patch{overflow:auto;margin:0;padding:14px 16px;background:#f6f8fa;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}.md table{border-collapse:collapse;width:100%;display:block;overflow:auto;margin:12px 0}.md th,.md td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}.md th{background:var(--soft);font-weight:600}.md code{background:var(--soft);border-radius:4px;padding:1px 4px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}.md pre code{background:transparent;padding:0}.md blockquote{margin:12px 0;padding:0 12px;color:var(--muted);border-left:3px solid var(--line)}.md ul,.md ol{padding-left:24px}.patch{padding:0;background:#fff}.diffline{display:block;min-width:max-content;padding:0 14px;white-space:pre}.diff-add{background:#dafbe1;color:#116329}.diff-del{background:#ffebe9;color:#82071e}.diff-meta{background:#f6f8fa;color:#57606a}.diff-hunk{background:#ddf4ff;color:#0550ae}
 .filebar{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--soft);color:var(--muted)}
 .commits{display:grid;gap:0}.commit{display:grid;grid-template-columns:minmax(0,1fr) 140px 92px;gap:12px;padding:12px;border-top:1px solid var(--line)}
 .commit:first-child{border-top:0}.commit-title{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.muted{color:var(--muted);font-size:12px}.sha{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}
@@ -273,7 +273,15 @@ const renderCommits = async () => {
 const renderCommit = async (sha) => {
   setTabs("commits"); crumbs.textContent = short(sha);
   const data = await api("/diff/" + encodeURIComponent(sha));
-  app.innerHTML = '<section class="panel"><div class="diffhead"><h2>' + esc(data.title || sha) + '</h2><div class="muted">' + esc(data.author.name || "") + ' · ' + fmtDate(data.author.date) + ' · <span class="sha">' + esc(data.sha) + '</span></div></div><pre class="patch">' + esc(data.patch || "") + '</pre></section>';
+  const patch = (data.patch || "").split("\\n").map(line => {
+    const cls = line.startsWith("+") && !line.startsWith("+++") ? "diff-add"
+      : line.startsWith("-") && !line.startsWith("---") ? "diff-del"
+      : line.startsWith("@@") ? "diff-hunk"
+      : /^(diff --git|index |--- |\\+\\+\\+ |[A-Za-z].*\\|)/.test(line) ? "diff-meta"
+      : "";
+    return '<span class="diffline ' + cls + '">' + esc(line || " ") + '</span>';
+  }).join("");
+  app.innerHTML = '<section class="panel"><div class="diffhead"><h2>' + esc(data.title || sha) + '</h2><div class="muted">' + esc(data.author.name || "") + ' · ' + fmtDate(data.author.date) + ' · <span class="sha">' + esc(data.sha) + '</span></div></div><pre class="patch">' + patch + '</pre></section>';
 };
 const render = async () => {
   try {
