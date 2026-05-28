@@ -21,7 +21,7 @@ import { handleApi } from "./json-api.js";
 import { canonicalJson, validRepoParts } from "./repo.js";
 import { an } from "./lib/an.js";
 import { encode as b64encode } from "./lib/base64.js";
-import { repoPage } from "./ui.js";
+import { homePage, repoPage } from "./ui.js";
 
 const REPOS_ROOT = `${Deno.cwd()}/repos`;
 const BLOBS_ROOT = `${Deno.cwd()}/blobs`;
@@ -118,11 +118,49 @@ const verifyAuth = async (req, authorPub, name) => {
   return false;
 };
 
+const listRepos = async () => {
+  const repos = new Map();
+  try {
+    for await (const authorDir of Deno.readDir(`${MESSAGES_ROOT}/by-author`)) {
+      if (!authorDir.isDirectory) continue;
+      const indexFile =
+        `${MESSAGES_ROOT}/by-author/${authorDir.name}/index.jsonl`;
+      let lines = [];
+      try {
+        lines = (await Deno.readTextFile(indexFile)).trim().split("\n")
+          .filter(Boolean);
+      } catch (_) {
+        continue;
+      }
+      for (const line of lines) {
+        const entry = JSON.parse(line);
+        if (entry.type !== "git-update" || !entry.repo) continue;
+        const key = `${entry.repo.author}\0${entry.repo.name}`;
+        const existing = repos.get(key);
+        repos.set(key, {
+          repo: entry.repo,
+          latestTs: Math.max(entry.ts, existing?.latestTs || 0),
+          updateCount: (existing?.updateCount || 0) + 1,
+        });
+      }
+    }
+  } catch (_) {
+    return [];
+  }
+  return Array.from(repos.values())
+    .sort((a, b) =>
+      b.latestTs - a.latestTs || a.repo.name.localeCompare(b.repo.name)
+    );
+};
+
 const handle = async (req) => {
   const url = new URL(req.url);
 
   if (url.pathname === "/" || url.pathname === "/index.html") {
-    return new Response(LANDING, { headers: { "content-type": "text/html" } });
+    return new Response(
+      homePage({ repos: await listRepos(), serverPub, port: PORT }),
+      { headers: { "content-type": "text/html; charset=utf-8" } },
+    );
   }
 
   const authMatch = url.pathname.match(AUTH_ROUTE);

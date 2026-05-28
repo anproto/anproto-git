@@ -8,6 +8,56 @@ const escapeHtml = (s = "") =>
       "'": "&#39;",
     })[ch]);
 
+const repoHref = (repo) =>
+  `/git/${encodeURIComponent(repo.author)}/${encodeURIComponent(repo.name)}/`;
+
+export const homePage = ({ repos, serverPub, port }) => {
+  const rows = repos.length
+    ? repos.map((repo) =>
+      `<a class="repo" href="${repoHref(repo.repo)}">
+        <strong>${escapeHtml(repo.repo.name)}</strong>
+        <code>${escapeHtml(repo.repo.author)}</code>
+        <span>${repo.updateCount} update${
+        repo.updateCount === 1 ? "" : "s"
+      }</span>
+      </a>`
+    ).join("")
+    : `<div class="empty">No repos have been pushed here yet.</div>`;
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>anproto-git</title>
+<style>
+:root{color-scheme:light;--ink:#202124;--muted:#667085;--line:#d0d7de;--soft:#f6f8fa;--accent:#0f766e}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--ink);background:#fff}
+a{color:#0969da;text-decoration:none}a:hover{text-decoration:underline}.wrap{max-width:980px;margin:0 auto;padding:28px 20px}
+header{border-bottom:1px solid var(--line)}h1{font-size:28px;margin:0 0 6px;letter-spacing:0}p{color:var(--muted);margin:0 0 18px}.pub{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);word-break:break-all}
+.panel{border:1px solid var(--line);border-radius:6px;overflow:hidden;background:#fff;margin-top:18px}.panel h2{font-size:15px;margin:0;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--soft)}
+.repo{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 14px;padding:12px;border-top:1px solid var(--line);align-items:center}.repo:first-of-type{border-top:0}.repo:hover{background:var(--soft);text-decoration:none}.repo code{grid-column:1;color:var(--muted);font:12px ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.repo span{grid-column:2;grid-row:1 / span 2;color:var(--muted);font-size:12px}.empty{padding:28px;text-align:center;color:var(--muted)}
+pre{overflow:auto;background:var(--soft);border:1px solid var(--line);border-radius:6px;padding:12px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+@media(max-width:640px){.repo{grid-template-columns:1fr}.repo span{grid-column:1;grid-row:auto}}
+</style>
+</head>
+<body>
+<header><div class="wrap">
+  <h1>anproto-git</h1>
+  <p>Repos pushed to this local forge.</p>
+  <div class="pub">${escapeHtml(serverPub)}</div>
+</div></header>
+<main class="wrap">
+  <section class="panel"><h2>Repos</h2>${rows}</section>
+  <h2>Push Here</h2>
+  <pre>git remote add anproto http://127.0.0.1:${port}/git/${
+    encodeURIComponent(serverPub)
+  }/&lt;repo-name&gt;
+git push anproto main</pre>
+</main>
+</body>
+</html>`;
+};
+
 export const repoPage = ({ authorPub, name, port }) => {
   const repoBase = `/git/${encodeURIComponent(authorPub)}/${
     encodeURIComponent(name)
@@ -98,13 +148,30 @@ const api = async (path) => {
 const short = (sha) => sha ? sha.slice(0, 7) : "";
 const fmtDate = (iso) => iso ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(iso)) : "";
 const setError = (err) => { app.innerHTML = '<div class="panel error">' + esc(err.message || String(err)) + '</div>'; };
-const md = (text) => {
+const md = (text, basePath = "") => {
   const raw = text.replace(/\\r\\n/g, "\\n").split("\\n");
   let out = "", inCode = false, list = null, para = [];
   const tick3 = String.fromCharCode(96).repeat(3);
+  const localHref = (href) => {
+    if (/^(https?:|mailto:|#)/.test(href)) return href;
+    const clean = href.split("#")[0];
+    const hash = href.includes("#") ? "#" + href.split("#").slice(1).join("#") : "";
+    if (!clean) return hash || "#";
+    const base = basePath.split("/").slice(0, -1).filter(Boolean);
+    const parts = clean.split("/").filter(Boolean);
+    const path = [];
+    for (const part of [...base, ...parts]) {
+      if (part === ".") continue;
+      if (part === "..") path.pop();
+      else path.push(part);
+    }
+    return "#/blob/" + encodeURIComponent(path.join("/")) + hash;
+  };
   const inline = (s) => esc(s)
     .replace(/\\\`([^\\\`]+)\\\`/g, "<code>$1</code>")
-    .replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, '<a href="$2">$1</a>');
+    .replace(/\\[([^\\]]+)\\]\\(([^\\s)]+)\\)/g, (_, label, href) =>
+      '<a href="' + esc(localHref(href)) + '">' + label + '</a>'
+    );
   const closePara = () => { if (para.length) { out += "<p>" + inline(para.join(" ")) + "</p>"; para = []; } };
   const closeList = () => { if (list) { out += "</" + list + ">"; list = null; } };
   const cells = (line) => line.trim().replace(/^\\||\\|$/g, "").split("|").map(c => inline(c.trim()));
@@ -185,7 +252,7 @@ const renderTree = async (path = "") => {
     if (readme) {
       try {
         const b = await api("/blob?ref=" + encodeURIComponent(state.ref) + "&path=" + encodeURIComponent(readme.path));
-        document.getElementById("readme").innerHTML = '<section class="panel readme"><h2>' + esc(readme.name) + '</h2><div class="md">' + md(b.content) + '</div></section>';
+        document.getElementById("readme").innerHTML = '<section class="panel readme"><h2>' + esc(readme.name) + '</h2><div class="md">' + md(b.content, readme.path) + '</div></section>';
       } catch (_) {}
     }
   }
@@ -193,7 +260,10 @@ const renderTree = async (path = "") => {
 const renderBlob = async (path) => {
   setTabs("code"); setCrumbs(path);
   const data = await api("/blob?ref=" + encodeURIComponent(state.ref) + "&path=" + encodeURIComponent(path));
-  app.innerHTML = '<section class="panel file"><div class="filebar"><span>' + esc(path) + '</span><span>' + data.size + ' bytes</span></div><pre>' + esc(data.truncated ? "File too large to preview." : data.content) + '</pre></section>';
+  const body = /\\.md$/i.test(path) && !data.truncated
+    ? '<div class="md">' + md(data.content, path) + '</div>'
+    : '<pre>' + esc(data.truncated ? "File too large to preview." : data.content) + '</pre>';
+  app.innerHTML = '<section class="panel file"><div class="filebar"><span>' + esc(path) + '</span><span>' + data.size + ' bytes</span></div>' + body + '</section>';
 };
 const renderCommits = async () => {
   setTabs("commits"); crumbs.textContent = "";
