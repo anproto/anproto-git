@@ -53,7 +53,7 @@ button,select{font:inherit}
 .commit:first-child{border-top:0}.commit-title{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.muted{color:var(--muted);font-size:12px}.sha{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}
 .diffhead{padding:14px 16px;border-bottom:1px solid var(--line)}.diffhead h2{font-size:18px;margin:0 0 6px}
 .empty,.error{padding:32px;text-align:center;color:var(--muted)}.error{color:var(--warn)}
-@media(max-width:760px){.repohead{grid-template-columns:1fr}.clone{min-width:0}.commit{grid-template-columns:1fr}.meta{text-align:left}.row{grid-template-columns:1fr}}
+@media(max-width:760px){.repohead{grid-template-columns:1fr}.clone{min-width:0}.commit{grid-template-columns:1fr}.row{grid-template-columns:minmax(0,1fr) auto}.meta{text-align:right}}
 </style>
 </head>
 <body>
